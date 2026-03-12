@@ -50,11 +50,36 @@ hr{border-color:#1b4332!important}
 # ════════════════════════════════════════════════════════════════
 
 def load_excel(file_bytes: bytes) -> dict:
-    """Returns {inventory: df, sales_log: df}"""
-    xl = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+    """
+    Loads all sheets. Each sheet has Row 1 = decorative title, Row 2 = real headers.
+    Scans every sheet to find the actual header row automatically.
+    """
+    xl_raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
     result = {}
-    for name, df in xl.items():
-        result[name.lower().replace(" ", "_")] = df
+    HEADER_KEYWORDS = ["date","product","profit","revenue","sold","cost","unit","qty","margin","stock"]
+
+    for sheet_name, df in xl_raw.items():
+        header_row_idx = 0  # default fallback
+
+        # Scan rows to find the one that looks like a header
+        for i in range(min(5, len(df))):  # check first 5 rows only
+            row_vals = " ".join(str(v).lower() for v in df.iloc[i].values if pd.notna(v))
+            matches = sum(1 for kw in HEADER_KEYWORDS if kw in row_vals)
+            if matches >= 2:  # row must contain at least 2 keywords to be a header
+                header_row_idx = i
+                break
+
+        # Set that row as column names, data starts after it
+        df.columns = [str(c).strip() for c in df.iloc[header_row_idx].values]
+        df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
+
+        # Drop completely empty rows
+        df = df.dropna(how="all")
+
+        # Store with normalised key
+        key = sheet_name.lower().strip().replace(" ", "_")
+        result[key] = df
+
     return result
 
 def parse_whatsapp_sales(text: str, inventory_df: pd.DataFrame) -> dict[str, int]:
@@ -222,12 +247,23 @@ with st.sidebar:
         st.session_state.inventory_data  = load_excel(st.session_state.inventory_bytes)
 
         # Run ML on upload
-        log_key = next((k for k in st.session_state.inventory_data
-                        if "log" in k or "sales" in k), None)
+        sheets = list(st.session_state.inventory_data.keys())
+        log_key = next((k for k in sheets if any(w in k for w in ["log","sales","daily"])), None)
+        if not log_key and len(sheets) > 1:
+            log_key = sheets[1]  # fallback: second sheet
+
         if log_key:
-            st.session_state.ml_results = run_ml_prediction(
-                st.session_state.inventory_data[log_key])
-        st.success("✅ Stock file loaded!")
+            ml = run_ml_prediction(st.session_state.inventory_data[log_key])
+            st.session_state.ml_results = ml
+            if "error" in ml:
+                st.warning(f"⚠️ ML: {ml['error']}")
+            else:
+                st.success("✅ Stock file loaded!")
+        else:
+            st.warning("⚠️ Could not find Daily Sales Log sheet")
+
+        # Show detected sheet names for debug
+        st.caption(f"Sheets found: {', '.join(sheets)}")
 
     st.markdown("---")
     st.markdown("**📱 Paste WhatsApp Sales Text**")
